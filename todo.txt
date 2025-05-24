@@ -1,0 +1,8 @@
+1. Add Health check for the database.
+2. Add Bully algorith (don't think about data inconsistency at this point).
+3. Do data consistency or slave should have same data as master.
+4. When previous master comes up, 
+   until it have same data as the current master, 
+   don't allow read oprations on it.
+5. Create a checkStatus that will check if slave has same data as master,
+   If not, copy data from master to slave.
