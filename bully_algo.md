@@ -1,170 +1,235 @@
-Sure! Here's a **Node.js Bully Algorithm example with real MongoDB connections using Mongoose**, managing **3 MongoDB instances** as separate databases. It elects the highest-priority **master** and routes all writes to it, while others become **slaves**.
+Awesome! Let’s build a **term-based Bully Algorithm with syncing logic** in Node.js to handle the master rejoining scenario safely.
 
 ---
 
-# Step-by-step
+## What we’ll add:
 
-* You have 3 MongoDB connection URIs (e.g. 3 different instances or clusters).
-* Each MongoDB instance is represented by a connection and a priority (ID).
-* The Node.js service monitors these DBs, elects a master using Bully Algorithm.
-* Writes go only to the master.
-* Slaves can be used for reads or standby.
+1. **Term (epoch) tracking** for each DB.
+2. Store term info **inside each database** (e.g., a simple `metadata` collection).
+3. When a node wants to become master, it:
+
+   * Checks its term against the highest term known.
+   * If outdated, it syncs data from current master first, updates term, then can try again later.
+4. Election increments the global term.
+5. Master notifies slaves of its term and role.
 
 ---
 
-## Prerequisites
+## Setup Assumptions:
 
-```bash
-npm init -y
-npm install mongoose
+* Using MongoDB with Mongoose (3 DB connections).
+* Each DB has a `Metadata` model with a document that stores current `term`.
+* We simulate sync by copying the current master's term to the follower (you can extend this to real data sync).
+
+---
+
+### Step 1: Update schema for `Metadata`
+
+```js
+const metadataSchema = new mongoose.Schema({
+  key: { type: String, unique: true },
+  term: Number,
+});
+
+const Metadata = connection.model('Metadata', metadataSchema);
 ```
 
-Make sure you have 3 MongoDB instances running or accessible, and update connection URIs accordingly.
-
 ---
 
-## Complete Code: `bullyMongo.js`
+### Step 2: Full implementation example: `termBullyMongo.js`
 
 ```js
 const mongoose = require('mongoose');
 
-// Replace these URIs with your actual MongoDB connection strings
 const databases = [
-  { id: 3, name: 'db3', uri: 'mongodb://localhost:27017/db3', role: 'unknown', alive: false, connection: null },
-  { id: 2, name: 'db2', uri: 'mongodb://localhost:27018/db2', role: 'unknown', alive: false, connection: null },
-  { id: 1, name: 'db1', uri: 'mongodb://localhost:27019/db1', role: 'unknown', alive: false, connection: null },
+  { id: 3, name: 'db3', uri: 'mongodb://localhost:27017/db3', role: 'unknown', alive: false, connection: null, term: 0 },
+  { id: 2, name: 'db2', uri: 'mongodb://localhost:27018/db2', role: 'unknown', alive: false, connection: null, term: 0 },
+  { id: 1, name: 'db1', uri: 'mongodb://localhost:27019/db1', role: 'unknown', alive: false, connection: null, term: 0 },
 ];
 
 let coordinator = null;
+let globalTerm = 0;
 
-// Simple schema to test writes
+// Schemas
 const testSchema = new mongoose.Schema({
   data: String,
   createdAt: Date,
 });
+const metadataSchema = new mongoose.Schema({
+  key: { type: String, unique: true },
+  term: Number,
+});
 
-// Model map by DB id
+// Models map: dbId => { testModel, metadataModel }
 const models = {};
 
-// Try to connect to each DB and update status
-async function checkDatabasesHealth() {
-  console.log('\n📡 Checking database health...');
+// Helper: Connect and init models per DB
+async function connectDBs() {
   for (let db of databases) {
     if (db.connection) {
-      // Close previous connection before reconnecting
-      await db.connection.disconnect().catch(() => {});
+      await db.connection.close().catch(() => {});
     }
     try {
       db.connection = await mongoose.createConnection(db.uri, { useNewUrlParser: true, useUnifiedTopology: true });
-      models[db.id] = db.connection.model('Test', testSchema);
+      models[db.id] = {
+        Test: db.connection.model('Test', testSchema),
+        Metadata: db.connection.model('Metadata', metadataSchema),
+      };
+
       db.alive = true;
-      console.log(` - ${db.name} connected ✅`);
+      // Initialize metadata doc if not exists
+      const meta = await models[db.id].Metadata.findOne({ key: 'term' });
+      if (!meta) {
+        await new models[db.id].Metadata({ key: 'term', term: 0 }).save();
+      }
+      // Read current term from DB
+      const metaDoc = await models[db.id].Metadata.findOne({ key: 'term' });
+      db.term = metaDoc ? metaDoc.term : 0;
+
+      console.log(` - ${db.name} connected, term: ${db.term} ✅`);
     } catch (err) {
       db.alive = false;
       db.connection = null;
       console.log(` - ${db.name} connection failed ❌`);
     }
   }
-
-  if (!coordinator || !coordinator.alive) {
-    console.log('🚨 Coordinator down or not set, starting election...');
-    electCoordinator();
-  } else {
-    console.log(`Current coordinator: ${coordinator.name}`);
-  }
 }
 
-// Bully algorithm: elect highest alive DB as master
-function electCoordinator() {
+// Get highest term from all alive DBs
+function getHighestTerm() {
   const aliveDbs = databases.filter(db => db.alive);
-  if (aliveDbs.length === 0) {
-    console.log('❌ No alive databases found!');
-    coordinator = null;
-    return;
-  }
-
-  const newCoordinator = aliveDbs.reduce((max, db) => (db.id > max.id ? db : max));
-  coordinator = newCoordinator;
-  coordinator.role = 'master';
-
-  // Set others as slaves
-  databases.forEach(db => {
-    if (db.id !== coordinator.id && db.alive) {
-      db.role = 'slave';
-      console.log(`🔔 ${db.name} is now slave.`);
-    }
-  });
-
-  console.log(`🏆 New coordinator elected: ${coordinator.name}`);
+  if (aliveDbs.length === 0) return 0;
+  return Math.max(...aliveDbs.map(db => db.term));
 }
 
-// Write data ONLY to the master
+// Sync data from current master (simulate by copying term)
+async function syncDataFromMaster(db, master) {
+  console.log(`🔄 Syncing data of ${db.name} from master ${master.name}`);
+  // For demo: Just copy master's term to db
+  db.term = master.term;
+  if (models[db.id]) {
+    await models[db.id].Metadata.updateOne({ key: 'term' }, { term: db.term });
+  }
+  console.log(`✅ Sync complete for ${db.name}, term updated to ${db.term}`);
+}
+
+// Check if node can become master
+async function canBecomeMaster(db) {
+  const highestTerm = getHighestTerm();
+  if (db.term < highestTerm) {
+    console.log(`❌ ${db.name} term (${db.term}) < highest term (${highestTerm}). Must sync first.`);
+    const master = databases.find(d => d.id === coordinator?.id);
+    if (master) {
+      await syncDataFromMaster(db, master);
+    }
+    return false;
+  }
+  return true;
+}
+
+// Bully election
+async function electCoordinator() {
+  globalTerm++;
+
+  const aliveDbs = databases.filter(db => db.alive).sort((a, b) => b.id - a.id);
+  for (const db of aliveDbs) {
+    const canBeMaster = await canBecomeMaster(db);
+    if (canBeMaster) {
+      coordinator = db;
+      coordinator.role = 'master';
+      coordinator.term = globalTerm;
+      // Update term in DB
+      await models[db.id].Metadata.updateOne({ key: 'term' }, { term: globalTerm });
+      console.log(`🏆 New coordinator elected: ${coordinator.name}, term: ${globalTerm}`);
+
+      // Notify others
+      for (const other of aliveDbs) {
+        if (other.id !== coordinator.id) {
+          other.role = 'slave';
+          other.term = globalTerm;
+          if (models[other.id]) {
+            await models[other.id].Metadata.updateOne({ key: 'term' }, { term: globalTerm });
+          }
+          console.log(`🔔 ${other.name} set to slave with term ${globalTerm}`);
+        }
+      }
+      return;
+    }
+  }
+
+  console.log('❌ No eligible coordinator found');
+  coordinator = null;
+}
+
+// Write only to master
 async function writeData(data) {
   if (!coordinator || !coordinator.alive) {
-    console.log('❌ No coordinator available. Cannot write data.');
+    console.log('❌ No coordinator available, cannot write');
     return;
   }
 
   try {
-    const Model = models[coordinator.id];
+    const Model = models[coordinator.id]?.Test;
     if (!Model) {
-      console.log('❌ Model not found for coordinator DB');
+      console.log('❌ Model missing for coordinator');
       return;
     }
     const doc = new Model({ data, createdAt: new Date() });
     await doc.save();
-    console.log(`📝 Written data to ${coordinator.name}:`, data);
+    console.log(`📝 Written to ${coordinator.name} (term ${coordinator.term}):`, data);
   } catch (err) {
     console.log('❌ Write failed:', err.message);
   }
 }
 
-async function startMonitoring() {
-  await checkDatabasesHealth();
+async function monitor() {
+  await connectDBs();
 
-  // Periodically check DB health every 10 seconds
   setInterval(async () => {
-    await checkDatabasesHealth();
+    await connectDBs();
+
+    // Re-elect if coordinator down
+    if (!coordinator || !coordinator.alive) {
+      console.log('🚨 Coordinator down or missing, triggering election...');
+      await electCoordinator();
+    } else {
+      console.log(`Current coordinator: ${coordinator.name}, term: ${coordinator.term}`);
+    }
   }, 10000);
 
-  // Periodic writes every 7 seconds
   setInterval(async () => {
-    await writeData(`RandomValue-${Math.floor(Math.random() * 1000)}`);
+    await writeData(`Value-${Math.floor(Math.random() * 1000)}`);
   }, 7000);
 }
 
-startMonitoring();
+monitor();
 ```
 
 ---
 
-### How to run?
+## How to test
 
-1. Make sure 3 MongoDB instances are running on ports `27017`, `27018`, `27019`, or update the URIs accordingly.
-2. Save the code above as `bullyMongo.js`
-3. Run:
-
-```bash
-node bullyMongo.js
-```
+1. Update MongoDB URIs as needed.
+2. Run `node termBullyMongo.js`.
+3. Watch the election and term logs.
+4. Stop the master MongoDB instance and see re-election.
+5. Restart old master and see sync prevent it from becoming master until caught up.
 
 ---
 
-### What you should see:
+### This setup:
 
-* Each DB connection success/failure.
-* Master election logs.
-* Writes going only to master DB.
-* If master DB goes down (simulate by stopping that MongoDB instance), election triggers and new master is elected.
-
----
-
-### Note:
-
-* This example uses **Mongoose `createConnection`** for multiple DB connections.
-* In production, replace random failure simulation with real health checks.
-* This does **not implement data replication** — just leader election and routing.
+* Protects against stale old masters reclaiming leadership.
+* Ensures new master always has highest term.
+* Syncs outdated nodes before allowing promotion.
+* Demonstrates term-based Bully Algorithm.
 
 ---
 
-If you want, I can help you extend this with **read from slaves**, or setup **automatic failover detection**. Just ask!
+If you want, I can also help you implement:
+
+* Real data replication between nodes
+* Reads from slaves
+* Better failure detection and notification
+
+Just say the word!
