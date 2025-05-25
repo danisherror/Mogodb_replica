@@ -1,34 +1,4 @@
-1. Add Health check for the database.
-2. Add Bully algorith (don't think about data inconsistency at this point).
-3. Do data consistency or slave should have same data as master.
-4. When previous master comes up, 
-   until it have same data as the current master, 
-   don't allow read oprations on it.
-5. Create a checkStatus that will check if slave has same data as master,
-   If not, copy data from master to slave.
- http POST http://localhost:3000/users name=Bob email=bob1@example.com
+http POST http://localhost:3000/users name=Bob email=bob1@example.com
 
-start the server
 ||
-||
-will start listening to the port
-||
-||
-find which database are active so that they can be used for election process.
-||
-After finding the active databases, select the database that have highest priority
-||
-||
-After a database become master, it will notify other active to become its slave,
-and master will wait for the ack from all the slave database that are active, after that it will become master.
-||
-||
-Data write will happen on master and data read will happen on slave.
-||
-||
-When writing data to the master, we will use some techniques by which master and slave have same data.
-i.e implement a sync function between master and slave.
-||
-||
-When a down slave comes up it won't automatically will become part to architecture, first it will be present in some state and 
-at that time it will sync with master after that it will become the slave of the current master database.
+Copy all collection and its data from the master.
