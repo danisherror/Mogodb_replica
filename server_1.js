@@ -30,21 +30,52 @@ function waitForConnection(connection) {
 }
 
 async function connectDBs() {
+  let master = databases.find((db) => db.role === "master");
+  if (master) {
+    for (let db of databases) {
+      if (!db.alive) {
+        try {
+          db.connection = await mongoose.createConnection(db.uri);
+          await waitForConnection(db.connection);
+
+          models[db.id] = {
+            Test: db.connection.model("Test", testSchema),
+            Metadata: db.connection.model("Metadata", metadataSchema),
+          };
+
+          await models[db.id].Metadata.findOne({ key: "term" }).lean();
+
+          db.alive = true;
+
+          // Sync from master
+          await syncDataFromMaster(db, master);
+
+          console.log(` - ${db.name} reconnected and synced ✅`);
+        } catch (err) {
+          db.alive = false;
+          db.connection = null;
+          console.log(` - ${db.name} reconnection failed ❌`, err.message);
+        }
+      }
+    }
+  }
+
+  // Now connect or reconnect all nodes fresh, updating models & terms
   for (let db of databases) {
     if (db.connection) {
       await db.connection.close().catch(() => {});
+      db.connection = null;
     }
+
     try {
       db.connection = await mongoose.createConnection(db.uri);
-
-      await waitForConnection(db.connection);  // <-- Wait here!
+      await waitForConnection(db.connection);
 
       models[db.id] = {
         Test: db.connection.model("Test", testSchema),
         Metadata: db.connection.model("Metadata", metadataSchema),
       };
 
-      // Test a simple query
       await models[db.id].Metadata.findOne({ key: "term" }).lean();
 
       db.alive = true;
@@ -63,6 +94,8 @@ async function connectDBs() {
     }
   }
 }
+
+
 
 
 function getHighestTerm() {
@@ -87,6 +120,7 @@ async function syncDataFromMaster(db, master) {
 
 async function canBecomeMaster(db) {
   const highestTerm = getHighestTerm();
+  console.log(` - ${db.name} term ${db.term}, highest term: ${highestTerm}`);
   if (db.term < highestTerm) {
     console.log(`❌ ${db.name} term too low. Syncing...`);
     const master = databases.find((d) => d.id === coordinator?.id);
@@ -98,29 +132,35 @@ async function canBecomeMaster(db) {
 
 async function electCoordinator() {
   globalTerm++;
+  console.log(`\n🔎 Starting election, globalTerm now: ${globalTerm}`);
+
   const aliveDbs = databases.filter((db) => db.alive).sort((a, b) => b.id - a.id);
   for (const db of aliveDbs) {
+    console.log(`Checking if ${db.name} can become master (term: ${db.term})`);
     if (await canBecomeMaster(db)) {
       coordinator = db;
       coordinator.role = "master";
       coordinator.term = globalTerm;
-      await models[db.id].Metadata.updateOne({ key: "term" }, { term: globalTerm });
+      await models[db.id].Metadata.updateOne({ key: "term" }, { term: globalTerm }, { upsert: true });
       console.log(`🏆 Elected: ${coordinator.name}, term ${globalTerm}`);
 
       for (const other of aliveDbs) {
         if (other.id !== db.id) {
           other.role = "slave";
           other.term = globalTerm;
-          await models[other.id].Metadata.updateOne({ key: "term" }, { term: globalTerm });
+          await models[other.id].Metadata.updateOne({ key: "term" }, { term: globalTerm }, { upsert: true });
           await syncDataFromMaster(other, db);
         }
       }
       return;
+    } else {
+      console.log(`${db.name} cannot become master.`);
     }
   }
   console.log("❌ No eligible coordinator found");
   coordinator = null;
 }
+
 
 async function monitor() {
   await connectDBs();
