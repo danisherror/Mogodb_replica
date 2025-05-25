@@ -6,7 +6,7 @@
    don't allow read oprations on it.
 5. Create a checkStatus that will check if slave has same data as master,
    If not, copy data from master to slave.
-
+ http POST http://localhost:3000/users name=Bob email=bob1@example.com
 
 start the server
 ||

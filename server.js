@@ -1,7 +1,6 @@
 require("dotenv").config();
 const express = require("express");
 const mongoose = require("mongoose");
-
 const app = express();
 app.use(express.json());
 
@@ -19,6 +18,8 @@ app.get("/", (req, res) => res.send("API is running"));
 app.post("/users", async (req, res) => {
   const user = new User(req.body);
   await user.save();
+   console.log("✅ data ")
+   console.log(user)
   res.status(201).send(user);
 });
 
