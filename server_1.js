@@ -266,6 +266,42 @@ app.get("/api/read/:dbId", async (req, res) => {
     }
 });
 
+app.put("/api/update/:id", async (req, res) => {
+    const { id } = req.params;
+    const { data } = req.body;
+
+    if (!data) return res.status(400).json({ error: "Data is required" });
+    if (!coordinator || !coordinator.alive) return res.status(500).json({ error: "No coordinator available" });
+
+    try {
+        const MasterModel = models[coordinator.id]?.Test;
+
+        // Update in master
+        const updatedDoc = await MasterModel.findByIdAndUpdate(id, { data }, { new: true });
+
+        if (!updatedDoc) return res.status(404).json({ error: "Document not found in master" });
+
+        // Propagate update to slaves
+        const slaves = databases.filter((d) => d.alive && d.id !== coordinator.id);
+        for (const slave of slaves) {
+            try {
+                const SlaveModel = models[slave.id]?.Test;
+                if (SlaveModel) {
+                    await SlaveModel.findByIdAndUpdate(id, { data }, { new: true });
+                    console.log(`🛰️ Updated on ${slave.name}`);
+                }
+            } catch (err) {
+                slave.alive = false;
+                console.log(`❌ Failed to update ${slave.name}: ${err.message}`);
+            }
+        }
+
+        return res.status(200).json({ message: "Update successful", updated: updatedDoc });
+    } catch (err) {
+        return res.status(500).json({ error: err.message });
+    }
+});
+
 // Health & Role Status
 app.get("/api/status", (req, res) => {
     res.json(
